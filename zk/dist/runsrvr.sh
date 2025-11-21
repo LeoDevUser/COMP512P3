@@ -10,7 +10,8 @@ fi
 
 #TODO Include your ZooKeeper connection string here. Make sure there are no spaces.
 # 	Replace with your server names and client ports.
-export ZKSERVER=tr-open-XX.cs.mcgill.ca:218XX,tr-open-XX.cs.mcgill.ca:218XX,tr-open-XX.cs.mcgill.ca:218XX
+export ZKSERVER=localhost:21814,localhost:21815,localhost:21816
+#export ZKSERVER=tr-open-XX.cs.mcgill.ca:218XX,tr-open-XX.cs.mcgill.ca:218XX,tr-open-XX.cs.mcgill.ca:218XX
 # export ZKSERVER=open-gpu-XX.cs.mcgill.ca:218XX,open-gpu-XX.cs.mcgill.ca:218XX,open-gpu-XX.cs.mcgill.ca:218XX
 
 java -cp $CLASSPATH:../task:.: DistProcess 
