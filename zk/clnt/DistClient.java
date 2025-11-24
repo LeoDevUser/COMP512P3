@@ -43,7 +43,7 @@ public class DistClient implements Watcher, AsyncCallback.StatCallback, AsyncCal
         // 	Your will be essentially holding up ZK client library 
         //	thread and you will not get other notifications.
         //	Instead include another thread in your program logic that
-        //   does the time consuming "work" and notify that thread from here.
+        //  does the time consuming "work" and notify that thread from here.
 
         System.out.println("DISTAPP : Event received : " + e);
         if(e.getType() == Watcher.Event.EventType.None) // This seems to be the event type associated with connections.
