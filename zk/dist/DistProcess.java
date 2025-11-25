@@ -91,7 +91,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
         } catch(NodeExistsException nee) { //node will be a worker
 			isManager=false;
 			try {
-				workerName = zk.create("/dist14/workers/worker-", pinfo.getBytes(), Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+				workerName = zk.create("/dist14/workers/worker-", null, Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
 				System.out.println("Created Node: " + workerName);
 				zk.getData(workerName, this, this, ""); //watch for data change, which indicates assignment
 			} catch (KeeperException kep) {
@@ -173,7 +173,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 		//worker should be notified when it gets assigned a task
         if(!isManager && workerName != null && !workerName.isEmpty()) {
             if(e.getType() == Watcher.Event.EventType.NodeDataChanged && e.getPath().equals(workerName)) {
-                System.out.println("WORKER: My data changed (task assigned?)");
+                System.out.println("WORKER: My data changed");
                 zk.getData(workerName, this, this, "ASSIGN");
             }
         }
@@ -223,7 +223,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 			try {
 				AssignedData assigned = new AssignedData(data, task);
 				byte[] new_data = toByteArray((Object) assigned);
-				zk.setData("/dist14/workers/"+ chosenWorker, new_data, 0, this, "ASSIGN");
+				zk.setData("/dist14/workers/"+ chosenWorker, new_data, -1, this, "ASSIGN");
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
@@ -231,6 +231,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
 		if (ctx != null && ctx.toString().startsWith("ASSIGN")) {
 			//send work to another thread to free up the zookeper thread
+			if(data == null) return;
 			System.out.println("got an assignment!!");
 			new Thread(() -> {
 				try { 
@@ -251,7 +252,9 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
 					// Store it inside the result node.
 					zk.create("/dist14/tasks/"+assignedData.task+"/result",new_data, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-					System.out.println("FINISHED PROCESSING TASK" + assignedData.task);
+					System.out.println("FINISHED PROCESSING" + assignedData.task);
+					zk.setData(workerName, null, -1);
+					System.out.println("Worker set status back to IDLE");
 				} catch (Exception e) {
 					e.printStackTrace();
 				}
@@ -261,45 +264,40 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
     //Asynchronous callback that is invoked by the zk.getChildren request.
     public void processResult(int rc, String path, Object ctx, List<String> children) {
-        //!! IMPORTANT !!
-        // Do not perform any time consuming/waiting steps here
-        //	including in other functions called from here.
-        // 	Your will be essentially holding up ZK client library 
-        //	thread and you will not get other notifications.
-        //	Instead include another thread in your program logic that
-        //   does the time consuming "work" and notify that thread from here.
-
-        // This logic is for manager !!
-        //Every time a new task znode is created by the client, this will be invoked.
-
-        // TODO: Filter out and go over only the newly created task znodes.
-        //		Also have a mechanism to assign these tasks to a "Worker" process.
-        //		The worker must invoke the "compute" function of the Task send by the client.
-        //What to do if you do not have a free worker process?
+        //TODO What to do if you do not have a free worker process?
         System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
 		if (ctx != null && ctx.equals("TASKS")) {
-				for(String task: children){
-				// Find available worker
+			for(String task: children){
+				//check if task already has result
+				try {
+					Stat stat = zk.exists("/dist14/tasks/" + task + "/result", false);
+					if(stat != null) {
+						System.out.println("Task " + task + " already done, skipping");
+						continue;
+					}
+				} catch(Exception e) {}
+
+				//find IDLE worker by checking their data
 				String assignedWorker = null;
-				synchronized(assignments) {
-					for(String worker : workers){
-						if(assignments.get(worker).equals("")) {
+				for(String worker : workers) {
+					try {
+						byte[] workerData = zk.getData("/dist14/workers/" + worker, false, null);
+
+						if(workerData == null) {
 							assignedWorker = worker;
 							assignments.put(worker, task);
-							break;  // Found one!
+							break;
 						}
+					} catch(Exception e) {
+						e.printStackTrace();
 					}
 				}
 
 				if(assignedWorker != null) {
 					zk.getData("/dist14/tasks/" + task, false, this, "TASK-DATA:" + assignedWorker + task);
-					System.out.println("Assigned Task to worker " + assignedWorker);
+					System.out.println("Assigned Task " + task + " to worker " + assignedWorker);
 				} else {
-					//TODO case where no idle worker for task
-					//we want to free zookeper thread
-					//we should do something here
-					//maybe delete the task node and make
-					//a different thread resumbit the task after a period of time?
+					System.out.println("No IDLE workers for task " + task);
 				}
 			}
 		}
