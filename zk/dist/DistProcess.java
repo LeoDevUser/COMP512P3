@@ -268,12 +268,14 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 			if(data == null) return;
 			System.out.println("got an assignment!!");
 			Thread workerThread = new Thread(() -> {
+				DistTask dt = null;
+				AssignedData assignedData = null;
 				try { 
-					AssignedData assignedData = (AssignedData) fromByteArray(data);
+					assignedData = (AssignedData) fromByteArray(data);
 					// Re-construct our task object.
 					ByteArrayInputStream bis = new ByteArrayInputStream(assignedData.data);
 					ObjectInput in = new ObjectInputStream(bis);
-					DistTask dt = (DistTask) in.readObject();
+					dt = (DistTask) in.readObject();
 
 					//Execute the task.
 					dt.compute();
@@ -292,11 +294,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 				} catch (InterruptedException ie) {
 					System.out.println("Task interrupted by time slice");
 					try {
-						AssignedData assignedData = (AssignedData) fromByteArray(data);
-						ByteArrayInputStream bis = new ByteArrayInputStream(assignedData.data);
-						ObjectInput in = new ObjectInputStream(bis);
-						DistTask dt = (DistTask) in.readObject();
-
+						// save updated task
 						ByteArrayOutputStream bos = new ByteArrayOutputStream();
 						ObjectOutputStream oos = new ObjectOutputStream(bos);
 						oos.writeObject(dt); oos.flush();
@@ -315,6 +313,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
 			workerThread.start();
 
+			// time slice thread
 			new Thread(() -> {
 				try {
 					Thread.sleep(timeSlice);
