@@ -18,21 +18,8 @@ import java.lang.management.*;
 import org.apache.zookeeper.*;
 import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.zookeeper.KeeperException.*;
-import org.apache.zookeeper.Op.SetData;
 import org.apache.zookeeper.data.Stat;
 
-// TODO
-// Replace XX with your group number.
-// You may have to add other interfaces such as for threading, etc., as needed.
-// This class will contain the logic for both your manager process as well as the worker processes.
-//  Make sure that the callbacks and watch do not conflict between your manager's logic and worker's logic.
-//		This is important as both the manager and worker may need same kind of callbacks and could result
-//			with the same callback functions.
-//	For simplicity, so far all the code in a single class (including the callbacks).
-//		You are free to break it apart into multiple classes, if that is your programming style or helps
-//		you manage the code more modularly.
-//	REMEMBER !! Managers and Workers are also clients of ZK and the ZK client library is single thread - Watches & CallBacks should not be used for time consuming tasks.
-//		In particular, if the process is a worker, Watches & CallBacks should only be used to assign the "work" to a separate thread inside your program.
 public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, AsyncCallback.DataCallback, AsyncCallback.StatCallback {
     ZooKeeper zk;
     String zkServer, pinfo;
@@ -42,7 +29,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 	List<String> workers = new ArrayList<>();
 	ConcurrentHashMap<String, String> assignments = new ConcurrentHashMap<>();
 	ConcurrentLinkedQueue<String> taskQueue = new ConcurrentLinkedQueue<>();
-	int timeSlice = 200; // execution timeslice (ms)
+	int timeSlice = 500; // execution timeslice (ms)
 
     DistProcess(String zkhost)
     {
@@ -137,14 +124,6 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     {
         //Get watcher notifications.
 
-        //!! IMPORTANT !!
-        // Do not perform any time consuming/waiting steps here
-        //	including in other functions called from here.
-        // 	Your will be essentially holding up ZK client library 
-        //	thread and you will not get other notifications.
-        //	Instead include another thread in your program logic that
-        //   does the time consuming "work" and notify that thread from here.
-
         System.out.println("DISTAPP : Event received : " + e);
 
         if(e.getType() == Watcher.Event.EventType.None) // This seems to be the event type associated with connections.
@@ -215,8 +194,6 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 			this.data = data;
 			this.task = task;
 		}
-
-
 	}
 
 	public static byte[] toByteArray(Object obj) throws IOException {
@@ -377,7 +354,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 		}
     }
 
-	private void flushQueue() {
+	private synchronized void flushQueue() {
 		for (String worker: workers) {
 			if (assignments.get(worker) != null && assignments.get(worker).equals("") && !taskQueue.isEmpty()) {
 				String task = taskQueue.poll();
