@@ -289,7 +289,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 					System.out.println("FINISHED PROCESSING" + assignedData.task);
 					zk.setData(workerName, null, -1);
 					System.out.println("Worker set status back to IDLE");
-				} catch (InterruptedException e) {
+				} catch (InterruptedException ie) {
 					System.out.println("Task interrupted by time slice");
 					try {
 						AssignedData assignedData = (AssignedData) fromByteArray(data);
@@ -305,9 +305,11 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 						zk.setData("/dist14/tasks/" + assignedData.task, task_data, -1);
 
 						zk.setData(workerName, null, -1);
-					} catch(Exception e) {
-						e.printStackTrace();
+					} catch(Exception ee) {
+						ee.printStackTrace();
 					}
+				} catch (Exception e) {
+					e.printStackTrace();
 				}
 			});
 
