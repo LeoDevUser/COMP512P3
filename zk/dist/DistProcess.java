@@ -1,7 +1,7 @@
 /*
 Copyright
 All materials provided to the students as part of this course is the property of respective authors. Publishing them to third-party (including websites) is prohibited. Students may save it for their personal use, indefinitely, including personal cloud storage spaces. Further, no assessments published as part of this course may be shared with anyone else. Violators of this copyright infringement may face legal actions in addition to the University disciplinary proceedings.
-©2022, Joseph D’Silva; ©2024, Bettina Kemme; ©2025, Olivier Michaud
+©2022, Joseph D'Silva; ©2024, Bettina Kemme; ©2025, Olivier Michaud
 */
 import java.io.*;
 
@@ -28,6 +28,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 	String workerName = "";
 	List<String> workers = new ArrayList<>();
 	ConcurrentHashMap<String, String> assignments = new ConcurrentHashMap<>();
+	ConcurrentHashMap<String, String> taskToWorker = new ConcurrentHashMap<>();  // track which worker has which task
 	ConcurrentLinkedQueue<String> taskQueue = new ConcurrentLinkedQueue<>();
 	int timeSlice = 500; // execution timeslice (ms)
 
@@ -152,25 +153,10 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
             getWorkers();
         }
 
+		//Manager watches worker data changes to detect when workers become IDLE
 		if (isManager && e.getType() == Watcher.Event.EventType.NodeDataChanged && e.getPath().startsWith("/dist14/workers/")) {
 			String name = e.getPath().substring("/dist14/workers/".length());
 			zk.getData(e.getPath(), this, this, "WORKER-STATUS:" + name);
-		}
-
-		if (isManager && e.getType() == Watcher.Event.EventType.NodeDataChanged && e.getPath().startsWith("/dist14/tasks/")) {
-			String taskName = e.getPath().substring("/dist14/tasks/".length());
-
-			try {
-				Stat stat = zk.exists(e.getPath() + "/result", false);
-				if (stat == null) {
-					if (!taskQueue.contains(taskName)) {
-						taskQueue.add(taskName);
-						flushQueue();
-					}
-				}
-			} catch(Exception ex) {
-				ex.printStackTrace();
-			}
 		}
 
 		//worker should be notified when it gets assigned a task
@@ -215,7 +201,7 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
     //Asynchronous callback that is invoked by the zk.getData request.
     public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
 		if (ctx != null && ctx.toString().startsWith("TASK-DATA:")) {
-			System.out.println("received task data");
+			System.out.println("MANAGER: Received task data");
 			//create worker assignment
 			String chosenWorker = ctx.toString().substring("TASK-DATA:".length());
 			chosenWorker = chosenWorker.substring(0, chosenWorker.indexOf("task"));
@@ -225,7 +211,6 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 				AssignedData assigned = new AssignedData(data, task);
 				byte[] new_data = toByteArray((Object) assigned);
 				zk.setData("/dist14/workers/"+ chosenWorker, new_data, -1, this, "ASSIGN");
-				zk.getData("/dist14/tasks/" + task, this, this, "TASK-UPDATED:" + task);
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
@@ -235,20 +220,43 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 			String workerName = ctx.toString().substring("WORKER-STATUS:".length());
 			// update assignments when worker stops working on task
 			if (data == null) {
-				assignments.put(workerName, "");
+				String oldTask = assignments.put(workerName, "");  // Get old value and set to IDLE
+				if (oldTask != null && !oldTask.equals("")) {
+					// Check if task was completed or just interrupted
+					try {
+						Stat resultStat = zk.exists("/dist14/tasks/" + oldTask + "/result", false);
+						if (resultStat == null) {
+							// Task was interrupted, not completed - remove from tracking so it can be reassigned
+							taskToWorker.remove(oldTask);
+							// Add back to queue if not already there
+							if (!taskQueue.contains(oldTask)) {
+								taskQueue.add(oldTask);
+								System.out.println("MANAGER: Task " + oldTask + " interrupted, added back to queue");
+							}
+						} else {
+							// Task was completed, just remove tracking
+							taskToWorker.remove(oldTask);
+							System.out.println("MANAGER: Task " + oldTask + " completed by " + workerName);
+						}
+					} catch (Exception e) {
+						e.printStackTrace();
+					}
+				}
+				flushQueue();
 			}
-			flushQueue();
 		}
 
 		if (ctx != null && ctx.toString().startsWith("ASSIGN")) {
 			//send work to another thread to free up the zookeper thread
 			if(data == null) return;
-			System.out.println("got an assignment!!");
+			System.out.println("WORKER: got an assignment!!");
 			Thread workerThread = new Thread(() -> {
 				DistTask dt = null;
 				AssignedData assignedData = null;
 				try { 
 					assignedData = (AssignedData) fromByteArray(data);
+					System.out.println("WORKER: Processing " + assignedData.task);
+					
 					// Re-construct our task object.
 					ByteArrayInputStream bis = new ByteArrayInputStream(assignedData.data);
 					ObjectInput in = new ObjectInputStream(bis);
@@ -264,22 +272,38 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 					byte[] new_data = bos.toByteArray();
 
 					// Store it inside the result node.
-					zk.create("/dist14/tasks/"+assignedData.task+"/result",new_data, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-					System.out.println("FINISHED PROCESSING" + assignedData.task);
-					zk.setData(workerName, null, -1);
-					System.out.println("Worker set status back to IDLE");
-				} catch (InterruptedException ie) {
-					System.out.println("Task interrupted by time slice");
 					try {
-						// save updated task
-						ByteArrayOutputStream bos = new ByteArrayOutputStream();
-						ObjectOutputStream oos = new ObjectOutputStream(bos);
-						oos.writeObject(dt); oos.flush();
-						byte[] task_data = bos.toByteArray();
+						zk.create("/dist14/tasks/"+assignedData.task+"/result",new_data, Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+						System.out.println("WORKER: FINISHED PROCESSING " + assignedData.task);
+					} catch (NodeExistsException nee) {
+						System.out.println("WORKER: Result already exists for " + assignedData.task + ", another worker finished it");
+					}
+					
+					// Worker sets itself to IDLE after completion
+					zk.setData(workerName, null, -1);
+					System.out.println("WORKER: Set status back to IDLE");
+					
+				} catch (InterruptedException ie) {
+					System.out.println("WORKER: Task interrupted by time slice");
+					try {
+						// Check if task node still exists before updating
+						Stat taskStat = zk.exists("/dist14/tasks/" + assignedData.task, false);
+						if (taskStat != null) {
+							// save updated task
+							ByteArrayOutputStream bos = new ByteArrayOutputStream();
+							ObjectOutputStream oos = new ObjectOutputStream(bos);
+							oos.writeObject(dt); oos.flush();
+							byte[] task_data = bos.toByteArray();
 
-						zk.setData("/dist14/tasks/" + assignedData.task, task_data, -1);
+							zk.setData("/dist14/tasks/" + assignedData.task, task_data, -1);
+							System.out.println("WORKER: Saved progress for " + assignedData.task);
+						} else {
+							System.out.println("WORKER: Task node deleted, skipping update for " + assignedData.task);
+						}
 
+						//worker sets itself to IDLE after interruption too
 						zk.setData(workerName, null, -1);
+						System.out.println("WORKER: Set status back to IDLE after interruption");
 					} catch(Exception ee) {
 						ee.printStackTrace();
 					}
@@ -308,7 +332,6 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 
     //Asynchronous callback that is invoked by the zk.getChildren request.
     public void processResult(int rc, String path, Object ctx, List<String> children) {
-        //TODO What to do if you do not have a free worker process?
         System.out.println("DISTAPP : processResult : " + rc + ":" + path + ":" + ctx);
 		if (ctx != null && ctx.equals("TASKS")) {
 			for(String task: children){
@@ -316,32 +339,39 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 				try {
 					Stat stat = zk.exists("/dist14/tasks/" + task + "/result", false);
 					if(stat != null) {
-						System.out.println("Task " + task + " already done, skipping");
+						System.out.println("MANAGER: Task " + task + " already done, skipping");
 						continue;
 					}
 				} catch(Exception e) {}
 
+				//check if task is already assigned
+				if (taskToWorker.containsKey(task)) {
+					System.out.println("MANAGER: Task " + task + " already assigned to " + taskToWorker.get(task) + ", skipping");
+					continue;
+				}
+
 				//find IDLE worker by checking their data
 				String assignedWorker = null;
 				for(String worker : workers) {
-					if(assignments.get(worker).equals("")) {
+					if(assignments.get(worker) != null && assignments.get(worker).equals("")) {
 						assignedWorker = worker;
 						assignments.put(worker, task);
+						taskToWorker.put(task, worker);  // Track the assignment
 						break;
 					}
 				}
 
 				if(assignedWorker != null) {
 					zk.getData("/dist14/tasks/" + task, false, this, "TASK-DATA:" + assignedWorker + task);
-					System.out.println("Assigned Task " + task + " to worker " + assignedWorker);
+					System.out.println("MANAGER: Assigned Task " + task + " to worker " + assignedWorker);
 				} else {
-					System.out.println("No IDLE workers for task " + task + ", added to queue");
+					System.out.println("MANAGER: No IDLE workers for task " + task + ", added to queue");
 					if (!taskQueue.contains(task)) {taskQueue.add(task);}
 				}
 			}
 		}
 		if (ctx != null && ctx.equals("WORKERS")) {
-			System.out.println("Available workers: " + children.size());
+			System.out.println("MANAGER: Available workers: " + children.size());
 			for(String worker : children) {
 				if(!assignments.containsKey(worker)) {
 					assignments.put(worker, "");
@@ -358,6 +388,13 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
 		for (String worker: workers) {
 			if (assignments.get(worker) != null && assignments.get(worker).equals("") && !taskQueue.isEmpty()) {
 				String task = taskQueue.poll();
+				if (task == null) continue;
+
+				//double-check task isn't already assigned
+				if (taskToWorker.containsKey(task)) {
+					System.out.println("MANAGER: Task " + task + " already assigned (from queue), skipping");
+					continue;
+				}
 
 				// check if result exists already
 				try {
@@ -368,8 +405,9 @@ public class DistProcess implements Watcher, AsyncCallback.ChildrenCallback, Asy
             	} catch(Exception e) {}
 
 				assignments.put(worker, task);
+				taskToWorker.put(task, worker);  // Track the assignment
 				zk.getData("/dist14/tasks/" + task, false, this, "TASK-DATA:" + worker + task);
-				System.out.println("Assigned Task " + task + " to worker " + worker + " from queue");
+				System.out.println("MANAGER: Assigned Task " + task + " to worker " + worker + " from queue");
 			}
 		}
 	}
